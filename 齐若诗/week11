@@ -1,1 +1,51 @@
+import os
 
+if not os.environ.get("OPENAI_API_KEY"):
+    api_key = input("请输入您的OpenAI API密钥: ")
+    os.environ["OPENAI_API_KEY"] = api_key
+
+if not os.environ.get("OPENAI_BASE_URL"):
+    os.environ["OPENAI_BASE_URL"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+import asyncio
+
+from agents import Agent, Runner
+from agents import set_default_openai_api, set_tracing_disabled
+
+set_default_openai_api("chat_completions")
+set_tracing_disabled(True)
+
+sentiment_agent = Agent(
+    name="sentiment_agent",
+    model="qwen-max",
+    instructions="你是一个情感分类专家。请分析用户输入文本的情感倾向，并给出明确的分类结果。情感分类包括：正面（积极）、负面（消极）、中性。回答时请直接给出分类结果，并简要说明理由。",
+)
+
+triage_agent = Agent(
+    name="triage_agent",
+    model="qwen-max",
+    instructions="你是一个智能路由助手。用户可能会提出各种请求，你需要根据请求类型选择合适的子agent来处理。当前可用的子agent包括：sentiment_agent（情感分析）。如果用户的请求是关于文本情感分析的，将请求转发给sentiment_agent。如果用户的请求不属于情感分析范畴，直接回答用户。",
+    handoffs=[sentiment_agent],
+)
+
+
+async def main():
+    msg = input("你好！我可以帮你进行文本情感分析。请输入你想分析的文本：")
+    agent = triage_agent
+    inputs = [{"content": msg, "role": "user"}]
+
+    while True:
+        result = await Runner.run(agent, input=inputs)
+        print(result.final_output)
+        print("\n")
+
+        user_msg = input("请输入要分析的文本（或输入 'quit' 退出）：")
+        if user_msg.lower() == 'quit':
+            print("再见！")
+            break
+        inputs.append({"content": user_msg, "role": "user"})
+        agent = result.current_agent
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
