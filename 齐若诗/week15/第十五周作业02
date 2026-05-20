@@ -1,0 +1,69 @@
+MinerU 论文核心要点
+MinerU 由上海人工智能实验室 OpenDataLab 团队发布，是一个多模块协同的文档解析框架，而非单一模型。
+
+核心架构：
+MinerU 基于多模块文档解析策略，利用来自 PDF-Extract-Kit 的多个开源模型，这些模型在真实世界的多样文档上训练，能处理复杂版面和公式。在获取各区域的位置和识别内容后，MinerU 采用定制化的处理工作流确保结果准确性。
+
+具体模块包括：
+* DocLayout-YOLO：版面检测（区分标题/正文/表格/图片/公式区域）
+* UniMERNet：数学公式识别，输出 LaTeX
+* PaddleOCR / RapidOCR：对扫描件或图片型 PDF 做 OCR
+* 读序重建算法：处理多栏、跨列文本的正确阅读顺序
+* 后处理规则引擎：去除页眉页脚、合并断行、修正标点
+
+最新版本（MinerU 2.5）在 OmniDocBench 上达到 86.2 分，超越上一代主流 VLM 的解析精度，并新增了对 PPTX、XLSX 原生格式的支持。
+
+支持三种解析模式：
+* txt：文本型 PDF，直接用 PyMuPDF 提取，速度最快
+* ocr：扫描件/图片型 PDF，全流程走视觉模型
+* auto：自动判断，先分类再路由到对应管道
+
+二、实验环境说明
+⚠️ 重要约束：MinerU 的完整 ML 管道需要 GPU 和约 10GB 模型权重，我的设备无法完整部署。因此本次测试对比的是：
+* pdfplumber：完整功能，使用 pdfminer.six 作为后端
+* MinerU 的核心引擎 PyMuPDF（fitz）：MinerU txt 模式的底层，亦即无 ML 时的基础层
+
+两者在基础文本/表格/结构化提取上的本质差异，而 MinerU 的 ML 层差异在第三节结合论文进行理论分析。
+测试文档为自建的双页学术论文式 PDF，包含：标题、摘要、公式、数据表格（6×5）、多级标题、参考文献。
+
+三、逐维度对比
+3.1 纯文本提取
+两者在基础文本提取上结果几乎一致——对于嵌入字体的文字型 PDF，正文文本都能完整提取。但有一个共同的细节问题：标题"Deep Learning for Document Understanding: A Survey"因 PDF 排版分两行，两个工具都按行返回，没有自动合并为一个语义单元。
+MinerU 的差异在这里体现：其 ML 管道中的 DocLayout-YOLO 会先识别整个标题区域的 bounding box，再从该区域内合并文字，从而得到语义完整的 # Deep Learning for Document Understanding: A Survey（Markdown 标题）。pdfplumber 和 PyMuPDF 的原始输出都缺少这一语义升华。
+3.2 表格提取
+这是差异最明显的维度之一。
+指标	pdfplumber	PyMuPDF (MinerU 核心)	MinerU 完整版
+表格检测	✅ 基于线段推断	✅ find_tables()	✅ YOLO 视觉检测
+数据提取准确率	✅ 100%（6行×5列全对）	✅ 100%（extract() 完整）	✅ + 输出为 Markdown / HTML 表格
+跨页表格	❌ 不支持	❌ 不支持	✅ 支持合并
+图片型表格	❌ 无法提取	❌ 无法提取	✅ OCR + 结构识别
+输出格式	Python list of list	DataFrame	Markdown `
+pdfplumber 的表格检测依赖 PDF 中的线段对象（rect / curve），对没有明显线框的表格（如仅靠空格分隔的文本表格）容易漏检。PyMuPDF 的 find_tables() 算法更鲁棒，同样样式的表格两者都检出，数据一致。MinerU 完整版则通过视觉模型直接在图像层面识别表格区域，能处理扫描件中的无线框表格。
+3.3 版面结构理解
+这是两类工具最本质的分野：
+pdfplumber 给出的是：每个字符的 (x, y, fontname, size, text)，words 列表，和拼接的 page text。它没有"标题"、"摘要"、"参考文献"这类语义概念，用户需要自己用启发式规则（比如字体大于 12 就是标题）来二次解析。
+MinerU 完整版 输出的是一个 JSON 结构，每个 block 带有 type 字段（title / text / table / figure / equation / list），以及对应的 Markdown。对于我们的测试文档，它能输出：
+3.4 公式处理
+pdfplumber 和 PyMuPDF 均将公式当作普通文本提取，输出 Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) * V ... (1)，希腊字母、分数、积分符号等在复杂公式中往往乱码或丢失。
+MinerU 利用 PDF-Extract-Kit 模型有效地从多样化文档中提取内容，并采用精细调整的预处理和后处理规则来确保最终结果的准确性。在公式方面，UniMERNet 会将检测到的公式区域转换为 LaTeX 字符串，这对 RAG 管道、数学文档检索等场景是决定性的优势。
+3.5 扫描件 / 图片型 PDF
+这是 pdfplumber 完全无法处理的场景——它只能提取 PDF 内嵌的字符串，对图片内容返回空白。
+MinerU 的 OCR 模式会先将页面光栅化为图像，通过 PaddleOCR 识别文字，再经版面检测还原结构，能处理扫描书籍、照片拍摄的文件等。
+3.6 速度与资源消耗
+	pdfplumber	MinerU txt 模式	MinerU OCR 模式
+测试文档速度	69ms	~100ms	数秒（需 GPU）
+依赖体积	轻量（~50MB）	基础轻量	模型约 10GB
+是否需要 GPU	否	否	建议
+内存占用	低	中	高
+四、总结：如何选择
+用 pdfplumber当：
+* 处理文字型 PDF（非扫描件），需要快速提取正文文本
+* 有明确线框的表格，需要 Python 友好的数据结构
+* 对资源消耗敏感（CI/CD、轻量服务器）
+* 需要精确的字符级坐标（做文档视觉分析、高亮标注）
+用 MinerU当：
+* 需要语义化结构输出（Markdown/JSON），直接喂给 LLM / RAG
+* 文档包含公式（需要 LaTeX 输出）
+* 需要处理扫描件或图片型 PDF
+* 文档有复杂版面（多栏、图文混排、跨页表格）
+* 目标是构建知识库，对读序正确性有要求
